@@ -1,0 +1,30 @@
+python-telegram-bot==20.7
+python-dotenv==1.0.1
+
+# Torch стек (CPU, без тритона)
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
+
+# Эмбеддинги
+sentence-transformers==2.7.0
+
+# Qdrant
+qdrant-client==1.11.3
+
+# PaddlePaddle
+paddlepaddle==3.2.2
+paddleocr==2.8.1
+
+# Работа с документами
+PyMuPDF==1.24.10
+pdfplumber==0.11.4
+python-docx==1.1.2
+Pillow==10.4.0
+opencv-python==4.10.0.84
+
+# Утилиты
+requests==2.32.3
+tqdm==4.66.5
+
+#

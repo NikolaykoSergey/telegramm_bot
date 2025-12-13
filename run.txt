@@ -1,0 +1,8 @@
+# запуск бота
+sudo systemctl stop docbot.service 2>/dev/null;
+sudo systemctl disable docbot.service 2>/dev/null; pkill -f bot.py;
+ulimit -v 8388608 && python3 bot.py
+
+# запуск
+pkill -f bot.py 2>/dev/null
+python3 bot.py

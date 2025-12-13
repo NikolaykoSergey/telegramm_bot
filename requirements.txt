@@ -1,0 +1,19 @@
+# requirements.api.txt (API-only / lightweight)
+python-telegram-bot==20.7
+python-dotenv==1.0.0
+requests==2.31.0
+numpy==1.24.3
+
+# Core RAG client (if you need to call embeddings remotely via sentence-transformers API wrappers)
+sentence-transformers==2.2.2
+
+# Optional: qdrant remote client (if you want direct client instead of HTTP requests)
+qdrant-client==1.7.0
+
+# Utilities
+watchdog
+joblib
+
+# Utilities
+watchdog
+joblib

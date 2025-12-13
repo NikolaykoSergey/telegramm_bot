@@ -1,0 +1,43 @@
+# Виртуальные окружения
+.venv/
+.venv2/
+.venv3/
+.venv_gemma/
+venv/
+env/
+ENV/
+
+# Индексы, БД и тяжёлые файлы
+qdrant_storage/
+faiss.index
+vector_index.pkl
+feedback.db
+embedding_cache/
+data/
+
+# Сессии и пользовательские данные
+sessions/
+users.json
+history.json
+
+# Python кеш
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+.vscode/
+
+# Логи
+*.log
+
+# Docker артефакты
+*.pid
+
+# Разное локальное
+local.env
+.env
+
+# Артефакты pip
+=*
