@@ -72,9 +72,10 @@ class RAGSystem:
 
         try:
             if not continue_indexing:
-                logger.info("🔄 Полная переиндексация (очистка БД)...")
+                logger.info("🔄 НАЧИНАЮ ПОЛНУЮ ПЕРЕИНДЕКСАЦИЮ (очистка БД)...")
                 self.vector_store.clear_collection()
                 self.indexed_files = []
+                logger.info("✅ Векторная БД очищена")
 
             # Получаем список файлов
             files = list(DOCUMENTS_FOLDER.glob("*.pdf")) + list(DOCUMENTS_FOLDER.glob("*.docx"))
@@ -85,63 +86,81 @@ class RAGSystem:
 
             # Фильтруем уже проиндексированные
             if continue_indexing:
+                files_before = len(files)
                 files = [f for f in files if f.name not in self.indexed_files]
+                files_after = len(files)
+                logger.info(f"📊 Файлов до фильтрации: {files_before}, после: {files_after}")
 
             if not files:
                 logger.info("✅ Все файлы уже проиндексированы")
                 return
 
-            logger.info(f"📚 Найдено файлов для индексации: {len(files)}")
+            logger.info(f"📚 НАЙДЕНО ФАЙЛОВ ДЛЯ ИНДЕКСАЦИИ: {len(files)}")
             logger.info(f"📊 Начинаю индексацию (continue={continue_indexing})")
             logger.info(f"💾 Память в начале: {process.memory_info().rss / 1024 / 1024:.1f}MB")
 
             total_fragments = 0
             total_files_processed = 0
+            failed_files = []
 
             # Обрабатываем файлы
-            for file_idx, file_path in enumerate(tqdm(files, desc="Индексация"), 1):
+            for file_idx, file_path in enumerate(tqdm(files, desc="Индексация", unit="файл"), 1):
                 if self._stop_indexing:
                     logger.info("🛑 Индексация остановлена пользователем")
                     break
 
-                logger.info(f"\n📁 Файл {file_idx}/{len(files)}: {file_path.name}")
+                logger.info(f"\n" + "=" * 80)
+                logger.info(f"📁 ФАЙЛ {file_idx}/{len(files)}: {file_path.name}")
+                logger.info("=" * 80)
                 file_start = time.time()
 
-                # Извлекаем фрагменты
-                fragments = self.document_processor.process_file(file_path)
+                try:
+                    # Извлекаем фрагменты
+                    logger.info(f"📄 Начинаю обработку файла...")
+                    fragments = self.document_processor.process_file(file_path)
 
-                if not fragments:
-                    logger.warning(f"⚠️ Файл {file_path.name} не содержит текста")
+                    if not fragments:
+                        logger.warning(f"⚠️ Файл {file_path.name} не содержит текста")
+                        failed_files.append((file_path.name, "нет текста"))
+                        continue
+
+                    logger.info(f"📤 Загрузка {len(fragments)} фрагментов в векторную БД...")
+                    db_start = time.time()
+                    self.vector_store.add_documents(fragments)
+                    db_time = time.time() - db_start
+
+                    # Помечаем как проиндексированный
+                    self.indexed_files.append(file_path.name)
+                    self._save_indexed_files()
+
+                    total_fragments += len(fragments)
+                    total_files_processed += 1
+
+                    file_time = time.time() - file_start
+                    memory_usage = process.memory_info().rss / 1024 / 1024
+
+                    logger.info(f"✅ ФАЙЛ {file_path.name} УСПЕШНО ПРОИНДЕКСИРОВАН:")
+                    logger.info(f"   📊 Фрагментов: {len(fragments)}")
+                    logger.info(f"   ⏱️ Время обработки файла: {file_time:.1f}с")
+                    logger.info(f"   ⏱️ Время загрузки в БД: {db_time:.1f}с")
+                    logger.info(f"   💾 Память: {memory_usage:.1f}MB")
+                    logger.info(f"   📈 Скорость: {len(fragments) / file_time:.1f} фрагм/сек")
+
+                except Exception as e:
+                    logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ ОБРАБОТКЕ ФАЙЛА {file_path.name}: {repr(e)}")
+                    failed_files.append((file_path.name, str(e)))
                     continue
-
-                # Добавляем в векторную БД
-                logger.info(f"   📤 Загрузка {len(fragments)} фрагментов в векторную БД...")
-                db_start = time.time()
-                self.vector_store.add_documents(fragments)
-                db_time = time.time() - db_start
-
-                # Помечаем как проиндексированный
-                self.indexed_files.append(file_path.name)
-                self._save_indexed_files()
-
-                total_fragments += len(fragments)
-                total_files_processed += 1
-
-                file_time = time.time() - file_start
-                memory_usage = process.memory_info().rss / 1024 / 1024
-
-                logger.info(f"✅ {file_path.name}:")
-                logger.info(f"   📊 {len(fragments)} фрагментов")
-                logger.info(f"   ⏱️ Время: {file_time:.1f}с (БД: {db_time:.1f}с)")
-                logger.info(f"   💾 Память: {memory_usage:.1f}MB")
-                logger.info(f"   📈 Средняя скорость: {len(fragments) / file_time:.1f} фрагм/сек")
 
             total_time = time.time() - process_start
             final_memory = process.memory_info().rss / 1024 / 1024
 
-            logger.info(f"\n🎉 Индексация завершена!")
-            logger.info(f"📊 Итоговая статистика:")
-            logger.info(f"   📁 Файлов обработано: {total_files_processed}/{len(files)}")
+            logger.info(f"\n" + "=" * 80)
+            logger.info(f"🎉 ИНДЕКСАЦИЯ ЗАВЕРШЕНА!")
+            logger.info("=" * 80)
+            logger.info(f"📊 ИТОГОВАЯ СТАТИСТИКА:")
+            logger.info(f"   📁 Всего файлов для индексации: {len(files)}")
+            logger.info(f"   ✅ Успешно обработано: {total_files_processed}")
+            logger.info(f"   ❌ Не удалось обработать: {len(failed_files)}")
             logger.info(f"   📄 Всего фрагментов: {total_fragments}")
             logger.info(f"   ⏱️ Общее время: {total_time:.1f}с")
             logger.info(f"   📈 Средняя скорость: {total_fragments / total_time:.1f} фрагм/сек")
@@ -150,8 +169,13 @@ class RAGSystem:
             if total_files_processed > 0:
                 logger.info(f"   📊 Среднее на файл: {total_fragments / total_files_processed:.1f} фрагментов")
 
+            if failed_files:
+                logger.warning(f"\n⚠️ НЕ УДАЛОСЬ ОБРАБОТАТЬ ФАЙЛЫ:")
+                for file_name, error in failed_files:
+                    logger.warning(f"   • {file_name}: {error}")
+
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка при индексации: {repr(e)}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ ИНДЕКСАЦИИ: {repr(e)}")
             raise
 
         finally:
@@ -177,12 +201,14 @@ class RAGSystem:
         Returns:
             {"answer": "ответ", "sources": [...], "relevance": float}
         """
-        logger.info(f"💬 Запрос: {user_query}")
+        logger.info(f"💬 ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {user_query}")
 
         # 1. Поиск релевантных фрагментов
+        logger.info(f"🔍 Поиск релевантных документов...")
         documents = self.vector_store.search(user_query, top_k=top_k)
 
         if not documents:
+            logger.warning(f"⚠️ Не удалось найти подходящие документы для запроса: {user_query}")
             return {
                 "answer": "❌ Не удалось найти подходящие документы.",
                 "sources": [],
@@ -229,6 +255,7 @@ class RAGSystem:
 
 Ответ:"""
 
+        logger.info(f"🤖 Генерация ответа через LLM...")
         answer = self.ollama.generate(prompt, system_prompt=system_prompt)
 
         # 4. Формируем источники
@@ -240,6 +267,8 @@ class RAGSystem:
             }
             for doc in documents
         ]
+
+        logger.info(f"✅ Ответ сгенерирован, релевантность: {relevance_percent:.1f}%")
 
         return {
             "answer": answer,
@@ -259,12 +288,15 @@ class RAGSystem:
         Returns:
             {"answer": "ответ", "sources": [...], "relevance": float}
         """
-        logger.info(f"💬 Запрос с историей: {user_query}")
+        logger.info(f"💬 ЗАПРОС С ИСТОРИЕЙ: {user_query}")
+        logger.info(f"📊 Размер истории: {len(history)} сообщений")
 
         # 1. Поиск релевантных фрагментов
+        logger.info(f"🔍 Поиск релевантных документов...")
         documents = self.vector_store.search(user_query, top_k=top_k)
 
         if not documents:
+            logger.warning(f"⚠️ Не удалось найти подходящие документы для запроса: {user_query}")
             return {
                 "answer": "❌ Не удалось найти подходящие документы.",
                 "sources": [],
@@ -297,6 +329,7 @@ class RAGSystem:
 
             if history_lines:
                 history_text = "\n".join(history_lines)
+                logger.info(f"📜 Используется история из {len(history_lines)} сообщений")
 
         # 4. Генерируем ответ через LLM
         system_prompt = """Ты — AI-ассистент для работы с технической документацией по лифтам и лифтовому оборудованию.
@@ -325,6 +358,7 @@ class RAGSystem:
 
         prompt = "\n".join(prompt_parts)
 
+        logger.info(f"🤖 Генерация ответа через LLM с учётом истории...")
         answer = self.ollama.generate(prompt, system_prompt=system_prompt)
 
         # 5. Формируем источники
@@ -337,6 +371,8 @@ class RAGSystem:
             for doc in documents
         ]
 
+        logger.info(f"✅ Ответ сгенерирован, релевантность: {relevance_percent:.1f}%")
+
         return {
             "answer": answer,
             "sources": sources,
@@ -344,24 +380,30 @@ class RAGSystem:
         }
 
     def generate_clarification_questions(self, user_query: str) -> List[str]:
-        """Генерация уточняющих вопросов"""
+        """Генерация уточняющих вопросов - БЕЗ ОГРАНИЧЕНИЙ"""
         system_prompt = """Ты помощник технической поддержки.
 Пользователь задал неоднозначный вопрос.
-Сгенерируй 3-5 коротких уточняющих вопросов (каждый на отдельной строке).
-Вопросы должны быть ОЧЕНЬ короткими (максимум 5-7 слов)."""
+Сгенерируй короткие уточняющие вопросы (каждый на отдельной строке).
+Вопросы должны быть ОЧЕНЬ короткими (максимум 5-7 слов).
+Генерируй столько вопросов, сколько считаешь нужным для уточнения."""
 
         prompt = f"""Вопрос пользователя: {user_query}
 
 Уточняющие вопросы:"""
 
         try:
+            logger.info(f"❓ Генерация уточняющих вопросов для: {user_query}")
             response = self.ollama.generate(prompt, system_prompt=system_prompt)
 
             # Парсим вопросы
             questions = [q.strip() for q in response.split('\n') if q.strip()]
             questions = [q.lstrip('0123456789.-) ') for q in questions]  # Убираем нумерацию
 
-            return questions[:5]  # Максимум 5 вопросов
+            # Фильтруем пустые и слишком длинные
+            questions = [q for q in questions if q and len(q.split()) <= 10]
+
+            logger.info(f"✅ Сгенерировано {len(questions)} уточняющих вопросов")
+            return questions
 
         except Exception as e:
             logger.error(f"❌ Ошибка генерации уточняющих вопросов: {repr(e)}")

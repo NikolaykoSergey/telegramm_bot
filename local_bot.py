@@ -566,6 +566,7 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     )
 
     try:
+        # Проверяем, нужны ли уточняющие вопросы (только если не пропущено)
         if not skip_clarification:
             questions = rag_system.generate_clarification_questions(query)
 
@@ -577,7 +578,7 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 for i, question in enumerate(questions, 1):
                     response += f"{i}. {question}\n"
 
-                response += "\nВведите номер вопроса или напишите свой уточняющий запрос"
+                response += f"\nВведите номер вопроса (1-{len(questions)}) или напишите свой уточняющий запрос"
 
                 await update.message.reply_text(response)
                 return
@@ -595,7 +596,9 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Сохраняем для обратной связи
         context.user_data['last_bot_response'] = {
             'question': query,
-            'answer': raw_answer
+            'answer': raw_answer,
+            'sources': sources,
+            'relevance': relevance
         }
 
         response = f"💡 Ответ:\n\n{raw_answer}\n\n"
@@ -630,11 +633,10 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text(response, reply_markup=get_feedback_keyboard())
 
     except Exception as e:
-        logger.error("Ошибка при AI поиске: %s", repr(e))
+        logger.error("❌ Ошибка при AI поиске: %s", repr(e))
         await update.message.reply_text(
             f"❌ Ошибка при обработке запроса: {str(e)}",
         )
-
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /stats"""

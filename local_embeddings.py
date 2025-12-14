@@ -11,10 +11,17 @@ from typing import List, Union, Optional
 import numpy as np
 
 from sentence_transformers import SentenceTransformer
-from FlagEmbedding import FlagModel
 from local_config import EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
+
+# Пытаемся импортировать FlagEmbedding
+try:
+    from FlagEmbedding import FlagModel
+    FLAG_EMBEDDING_AVAILABLE = True
+except ImportError:
+    FLAG_EMBEDDING_AVAILABLE = False
+    logger.warning("⚠️ FlagEmbedding не установлен, используем только SentenceTransformer")
 
 
 class EmbeddingCache:
@@ -65,18 +72,21 @@ class EmbeddingManager:
         self.model_name = model_name or EMBEDDING_MODEL
         self.cache = EmbeddingCache()
         self.model = None
+        self.is_flag_model = False
         self._init_model()
         logger.info(f"🔤 EmbeddingManager инициализирован: {self.model_name}")
 
     def _init_model(self):
         """Инициализация модели эмбеддингов с fallback"""
         try:
-            if "bge" in self.model_name.lower():
-                # BGE модели через FlagEmbedding
-                logger.info(f"🔄 Загружаем BGE модель: {self.model_name}")
+            model_lower = self.model_name.lower()
+
+            # Пробуем загрузить BGE через FlagEmbedding если доступно
+            if "bge" in model_lower and FLAG_EMBEDDING_AVAILABLE:
+                logger.info(f"🔄 Загружаем BGE модель через FlagEmbedding: {self.model_name}")
 
                 # Выбираем инструкцию в зависимости от модели
-                if "zh" in self.model_name.lower():
+                if "zh" in model_lower:
                     query_instruction = "为这个句子生成表示以用于检索相关文章："
                 else:
                     query_instruction = "Represent this sentence for searching relevant passages:"
@@ -85,20 +95,15 @@ class EmbeddingManager:
                     self.model_name,
                     query_instruction_for_retrieval=query_instruction,
                     use_fp16=False,  # Для CPU
-                    normalize_embeddings=True
                 )
+                self.is_flag_model = True
                 logger.info(f"✅ BGE модель загружена: {self.model_name}")
 
-            elif "e5" in self.model_name.lower():
-                # E5 модели требуют специального префикса
-                logger.info(f"🔄 Загружаем E5 модель: {self.model_name}")
-                self.model = SentenceTransformer(self.model_name, device="cpu")
-                logger.info(f"✅ E5 модель загружена: {self.model_name}")
-
             else:
-                # Стандартные SentenceTransformer модели
+                # Используем SentenceTransformer для остальных моделей
                 logger.info(f"🔄 Загружаем SentenceTransformer: {self.model_name}")
                 self.model = SentenceTransformer(self.model_name, device="cpu")
+                self.is_flag_model = False
                 logger.info(f"✅ SentenceTransformer загружен: {self.model_name}")
 
         except Exception as e:
@@ -107,9 +112,9 @@ class EmbeddingManager:
             logger.info("🔄 Загружаем fallback модель: all-MiniLM-L6-v2")
             self.model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
             self.model_name = "all-MiniLM-L6-v2"
+            self.is_flag_model = False
 
-    def encode(self, texts: Union[str, List[str]], use_cache: bool = True, batch_size: int = 32,
-               **kwargs) -> np.ndarray:
+    def encode(self, texts: Union[str, List[str]], use_cache: bool = True, batch_size: int = 32, **kwargs) -> np.ndarray:
         """Кодирование текста в эмбеддинги с кэшированием"""
         if isinstance(texts, str):
             texts = [texts]
@@ -133,23 +138,36 @@ class EmbeddingManager:
 
         # Кодируем не закэшированные тексты
         if uncached_texts:
-            logger.debug(f"🔤 Кодирование {len(uncached_texts)} текстов...")
+            total_uncached = len(uncached_texts)
+            logger.debug(f"🔤 Кодирование {total_uncached} текстов...")
 
-            if hasattr(self.model, 'encode'):
-                # SentenceTransformer
-                new_embeddings = self.model.encode(
-                    uncached_texts,
-                    show_progress_bar=False,
-                    normalize_embeddings=True,
-                    batch_size=batch_size,
-                    **kwargs
-                )
-            elif hasattr(self.model, 'encode_queries'):
-                # FlagModel (BGE) для запросов
-                new_embeddings = self.model.encode_queries(uncached_texts)
+            if self.is_flag_model:
+                # FlagModel (BGE)
+                if hasattr(self.model, 'encode_queries'):
+                    # Для запросов
+                    new_embeddings = self.model.encode_queries(uncached_texts)
+                else:
+                    # Для документов
+                    new_embeddings = self.model.encode(uncached_texts)
             else:
-                # FlagModel для документов
-                new_embeddings = self.model.encode(uncached_texts)
+                # SentenceTransformer - батч-обработка с логированием прогресса
+                new_embeddings = []
+                for batch_start in range(0, len(uncached_texts), batch_size):
+                    batch_end = min(batch_start + batch_size, len(uncached_texts))
+                    batch_texts = uncached_texts[batch_start:batch_end]
+
+                    # Логируем прогресс
+                    percent = (batch_end / len(uncached_texts)) * 100
+                    logger.debug(f"🔤 Кодирование батча: {batch_start+1}-{batch_end}/{len(uncached_texts)} ({percent:.1f}%)")
+
+                    batch_embeddings = self.model.encode(
+                        batch_texts,
+                        normalize_embeddings=True,
+                        **kwargs
+                    )
+                    new_embeddings.extend(batch_embeddings)
+
+                new_embeddings = np.array(new_embeddings)
 
             # Сохраняем в кэш
             for i, (text, emb) in enumerate(zip(uncached_texts, new_embeddings)):

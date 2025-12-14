@@ -29,20 +29,14 @@ OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "1024"))
 
 # === Эмбеддинги ===
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3").strip()
-# Альтернативы:
-# - "BAAI/bge-large-en-v1.5"  # 1024d, английский
-# - "BAAI/bge-base-en-v1.5"   # 768d, английский
-# - "intfloat/multilingual-e5-large"  # 1024d, мультиязычный
-# - "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"  # 768d
-# - "sentence-transformers/all-MiniLM-L6-v2"  # 384d, fallback
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2").strip()
 
 # === Qdrant ===
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333").strip()
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "tech_docs").strip()
 
 # === RAG ===
-TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "7"))
+TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "5"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 
@@ -52,11 +46,11 @@ ENABLE_TABLES = os.getenv("ENABLE_TABLES", "true").lower() == "true"
 OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "ru").split(",")
 
 # === Чистка текста через LLM ===
-ENABLE_TEXT_CLEANING = os.getenv("ENABLE_TEXT_CLEANING", "true").lower() == "true"
+ENABLE_TEXT_CLEANING = os.getenv("ENABLE_TEXT_CLEANING", "false").lower() == "true"
 
 # === Docling ===
-ENABLE_DOCLING = os.getenv("ENABLE_DOCLING", "true").lower() == "true"
-MAX_DOCLING_PAGES = int(os.getenv("MAX_DOCLING_PAGES", "20"))
+ENABLE_DOCLING = os.getenv("ENABLE_DOCLING", "false").lower() == "true"
+MAX_DOCLING_PAGES = int(os.getenv("MAX_DOCLING_PAGES", "9999"))  # Убрано ограничение
 
 # === История диалога ===
 MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "6000"))
@@ -90,7 +84,7 @@ def check_config() -> bool:
     print(f"   • OCR: {'включен' if ENABLE_OCR else 'выключен'}")
     print(f"   • Таблицы: {'включены' if ENABLE_TABLES else 'выключены'}")
     print(f"   • Чистка текста LLM: {'включена' if ENABLE_TEXT_CLEANING else 'выключена'}")
-    print(f"   • Docling: {'включён' if ENABLE_DOCLING else 'выключен'} (до {MAX_DOCLING_PAGES} стр.)")
+    print(f"   • Docling: {'включён' if ENABLE_DOCLING else 'выключен'}")
     print(f"   • История диалога: до {MAX_HISTORY_CHARS} символов")
     print(f"   • Размер чанка: {CHUNK_SIZE} символов, перекрытие: {CHUNK_OVERLAP}")
 

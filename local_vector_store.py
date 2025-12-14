@@ -57,11 +57,11 @@ class VectorStore:
             raise
 
     def add_documents(self, documents: List[Dict]):
-        """Добавление документов в векторное хранилище с логированием"""
+        """Добавление документов в векторное хранилище с детальным логированием"""
         if not documents:
             return
 
-        logger.info(f"📤 Загрузка {len(documents)} документов в Qdrant...")
+        logger.info(f"📤 Начинаю загрузку {len(documents)} документов в Qdrant...")
         start_time = time.time()
 
         try:
@@ -70,6 +70,7 @@ class VectorStore:
             indices_to_encode = []
 
             # Подготовка данных для батч-кодирования
+            logger.info("📝 Подготовка текстов для кодирования...")
             for i, doc in enumerate(documents):
                 content = doc.get("content", "")
                 if not content:
@@ -78,10 +79,16 @@ class VectorStore:
                 texts_to_encode.append(content)
                 indices_to_encode.append(i)
 
-            # Батч-кодирование
-            logger.debug(f"🔤 Кодирование {len(texts_to_encode)} текстов...")
+                # Логируем прогресс подготовки
+                if (i + 1) % 50 == 0:
+                    logger.info(f"📝 Подготовлено {i + 1}/{len(documents)} текстов...")
+
+            logger.info(f"🔤 Начинаю кодирование {len(texts_to_encode)} текстов...")
+
+            # Батч-кодирование с прогрессом
             embeddings = self.embedding_manager.encode(texts_to_encode, batch_size=32)
 
+            logger.info("🎯 Создание векторных точек...")
             # Создание точек
             for idx, doc_idx in enumerate(indices_to_encode):
                 doc = documents[doc_idx]
@@ -97,35 +104,51 @@ class VectorStore:
                 )
                 points.append(point)
 
+                # Логируем прогресс создания точек
+                if (idx + 1) % 100 == 0:
+                    logger.info(f"🎯 Создано {idx + 1}/{len(indices_to_encode)} точек...")
+
             if points:
                 # Загрузка в Qdrant
+                logger.info(f"📤 Загружаю {len(points)} точек в Qdrant...")
                 upload_start = time.time()
-                self.client.upsert(
-                    collection_name=self.collection_name,
-                    points=points,
-                )
+
+                # Загружаем батчами по 100 точек
+                batch_size = 100
+                for i in range(0, len(points), batch_size):
+                    batch = points[i:i + batch_size]
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=batch,
+                    )
+                    percent = min(100, (i + len(batch)) / len(points) * 100)
+                    logger.info(f"📤 Загружено {min(i + len(batch), len(points))}/{len(points)} точек ({percent:.1f}%)")
+
                 upload_time = time.time() - upload_start
 
                 total_time = time.time() - start_time
-                logger.info(f"✅ Добавлено {len(points)} документов в Qdrant")
-                logger.info(
-                    f"   ⏱️ Время: {total_time:.1f}с (кодирование: {total_time - upload_time:.1f}с, загрузка: {upload_time:.1f}с)")
+                logger.info(f"✅ Успешно добавлено {len(points)} документов в Qdrant")
+                logger.info(f"   ⏱️ Общее время: {total_time:.1f}с")
+                logger.info(f"   ⏱️ Время кодирования: {total_time - upload_time:.1f}с")
+                logger.info(f"   ⏱️ Время загрузки: {upload_time:.1f}с")
                 logger.info(f"   📈 Скорость: {len(points) / total_time:.1f} док/сек")
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при добавлении документов: {repr(e)}")
+            logger.error(f"❌ Критическая ошибка при добавлении документов в Qdrant: {repr(e)}")
             raise
 
     def search(self, query: str, top_k: int = 5) -> List[Dict]:
         """Поиск релевантных документов"""
-        logger.debug(f"🔍 Поиск: '{query[:50]}...', top_k={top_k}")
+        logger.debug(f"🔍 Начинаю поиск: '{query[:50]}...', top_k={top_k}")
         search_start = time.time()
 
         try:
             # Генерируем эмбеддинг запроса
+            logger.debug("🔤 Кодирование запроса...")
             query_embedding = self.embedding_manager.encode(query, use_cache=False)[0].tolist()
 
             # Поиск в Qdrant
+            logger.debug(f"🔎 Поиск в коллекции {self.collection_name}...")
             results = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
@@ -142,24 +165,24 @@ class VectorStore:
                 })
 
             search_time = time.time() - search_start
-            logger.debug(f"✅ Найдено {len(documents)} документов за {search_time * 1000:.0f}мс")
+            logger.info(f"✅ Найдено {len(documents)} документов за {search_time * 1000:.0f}мс")
 
             return documents
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при поиске: {repr(e)}")
+            logger.error(f"❌ Ошибка при поиске в Qdrant: {repr(e)}")
             return []
 
     def clear_collection(self):
         """Очистка коллекции"""
-        logger.warning("🗑️ Очистка векторной коллекции...")
+        logger.warning("🗑️ Начинаю очистку векторной коллекции...")
         try:
             self.client.delete_collection(collection_name=self.collection_name)
             # Ждем немного
             import time
             time.sleep(1)
             self._ensure_collection()
-            logger.info(f"✅ Коллекция {self.collection_name} очищена и пересоздана")
+            logger.info(f"✅ Коллекция {self.collection_name} успешно очищена и пересоздана")
         except Exception as e:
             logger.error(f"❌ Ошибка при очистке коллекции: {repr(e)}")
             raise

@@ -15,7 +15,7 @@ class OllamaClient:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "qwen2.5:3b",
+        model: str = "qwen2.5:1.5b",
         temperature: float = 0.1,
     ):
         self.base_url = base_url.rstrip("/")
@@ -40,6 +40,7 @@ class OllamaClient:
         }
 
         try:
+            logger.debug(f"🤖 Отправка запроса к Ollama (prompt: {len(prompt)} символов)")
             response = requests.post(
                 url,
                 json=payload,
@@ -47,11 +48,13 @@ class OllamaClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result.get("response", "").strip()
+            answer = result.get("response", "").strip()
+            logger.debug(f"🤖 Получен ответ от Ollama ({len(answer)} символов)")
+            return answer
 
         except requests.exceptions.Timeout as e:
-            logger.error(f"❌ Ошибка запроса к Ollama: {repr(e)}")
-            raise Exception(f"Ошибка связи с Ollama: {e}")
+            logger.error(f"❌ Таймаут запроса к Ollama: {repr(e)}")
+            raise Exception(f"Таймаут связи с Ollama: {e}")
         except Exception as e:
             logger.error(f"❌ Ошибка запроса к Ollama: {repr(e)}")
             raise Exception(f"Ошибка связи с Ollama: {e}")
@@ -78,5 +81,3 @@ class OllamaClient:
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Ollama: {repr(e)}")
             return False
-
-#oij

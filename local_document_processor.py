@@ -30,7 +30,7 @@ try:
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     PADDLEOCR_AVAILABLE = False
-    logging.warning("⚠️ PaddleOCR не установлен, OCR будет отключён.")
+    logger.warning("⚠️ PaddleOCR не установлен, OCR будет отключён.")
 
 # Пытаемся подключить Docling
 try:
@@ -39,7 +39,7 @@ try:
     DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
-    logging.warning("⚠️ Docling не установлен, функционал Docling будет отключён.")
+    logger.warning("⚠️ Docling не установлен, функционал Docling будет отключён.")
 
 
 def log_system_stats(stage: str):
@@ -60,14 +60,14 @@ def is_trash_text(text: str) -> bool:
         return True
 
     cleaned = text.strip()
-    if len(cleaned) < 200:  # менее 200 символов — мало для мануала
+    if len(cleaned) < 50:  # Уменьшил до 50 символов
         return True
 
     # Доля нормальных букв vs остального
-    letters = re.findall(r"[A-Za-zА-Яа-яЁё]", cleaned)
+    letters = re.findall(r"[A-Za-zА-Яа-яЁё0-9]", cleaned)
     ratio = len(letters) / max(len(cleaned), 1)
-    if ratio < 0.3:
-        # меньше 30% букв — похоже на мусор
+    if ratio < 0.2:  # Уменьшил до 20%
+        # меньше 20% букв/цифр — похоже на мусор
         return True
 
     return False
@@ -93,7 +93,7 @@ class TextCleaner:
             "- Просто сделай текст аккуратным для дальнейшей индексации."
         )
 
-        user_prompt = f"Файл: {file_name}, страница: {page}\n\nТекст:\n{text}"
+        user_prompt = f"Файл: {file_name}, страница: {page}\n\nТекст:\n{text[:2000]}"  # Ограничиваем длину
 
         try:
             logger.debug(f"🧹 Отправка в LLM для чистки ({len(text)} символов)...")
@@ -101,7 +101,6 @@ class TextCleaner:
             cleaned = self.ollama.generate(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                temperature=0.1,
                 max_tokens=1024,
             )
             clean_time = time.time() - start_time
@@ -144,7 +143,7 @@ class DocumentProcessor:
         if self.use_docling:
             try:
                 self.docling_converter = DocumentConverter()
-                logger.info("✅ Docling инициализирован")
+                logger.info("✅ Docling инициализирован (без ограничений по страницам)")
             except Exception as e:
                 logger.error(f"❌ Ошибка инициализации Docling: {repr(e)}")
                 self.use_docling = False
@@ -180,98 +179,128 @@ class DocumentProcessor:
         start_time = time.time()
 
         try:
+            logger.info(f"📄 НАЧИНАЮ ОБРАБОТКУ ФАЙЛА: {file_path.name}")
+
             with pdfplumber.open(file_path) as pdf:
                 num_pages = len(pdf.pages)
-                logger.info(f"📄 Начинаю обработку PDF: {file_path.name}, страниц: {num_pages}")
-                log_system_stats("pdf_start")
+                logger.info(f"📊 ФАЙЛ {file_path.name}: всего страниц: {num_pages}")
+                log_system_stats(f"start_{file_path.name}")
 
                 processed_pages = 0
                 total_chunks = 0
+                successful_pages = 0
 
                 for page_num, page in enumerate(pdf.pages, start=1):
                     processed_pages += 1
-                    logger.debug(f"   📄 Страница {page_num}/{num_pages}: извлечение текста...")
+                    logger.info(f"   📄 ОБРАБОТКА СТРАНИЦЫ {page_num}/{num_pages} файла {file_path.name}")
 
-                    # 1. БАЗОВЫЙ ТЕКСТ (pdfplumber)
-                    text = page.extract_text() or ""
-                    text = text.strip()
-                    logger.debug(f"      📝 Исходный текст: {len(text)} символов")
+                    try:
+                        # 1. БАЗОВЫЙ ТЕКСТ (pdfplumber)
+                        text = page.extract_text() or ""
+                        text = text.strip()
+                        logger.info(f"      📝 pdfplumber извлек {len(text)} символов")
 
-                    # 2. ТАБЛИЦЫ
-                    tables_text = ""
-                    if ENABLE_TABLES:
-                        tables = page.extract_tables()
-                        if tables:
-                            tables_text = self._format_tables(tables)
-                            logger.debug(f"      📊 Найдено таблиц: {len(tables)}")
+                        # 2. ТАБЛИЦЫ
+                        tables_text = ""
+                        if ENABLE_TABLES:
+                            try:
+                                tables = page.extract_tables()
+                                if tables:
+                                    tables_text = self._format_tables(tables)
+                                    logger.info(f"      📊 Найдено таблиц: {len(tables)} ({len(tables_text)} символов)")
+                            except Exception as e:
+                                logger.warning(f"      ⚠️ Ошибка извлечения таблиц: {repr(e)}")
 
-                    # Объединяем базовый текст + таблицы
-                    combined_text = "\n\n".join(part for part in [text, tables_text] if part and part.strip()).strip()
-                    logger.debug(f"      🔗 Объединенный текст: {len(combined_text)} символов")
+                        # Объединяем базовый текст + таблицы
+                        combined_text = "\n\n".join(
+                            part for part in [text, tables_text] if part and part.strip()).strip()
+                        logger.info(f"      🔗 Объединенный текст: {len(combined_text)} символов")
 
-                    # 3. ПРОВЕРКА: если текста мало или мусор → пробуем docling
-                    if is_trash_text(combined_text):
-                        logger.warning(
-                            f"      ⚠️ Мало текста на стр. {page_num} ({len(combined_text)} симв.), пробуем docling...")
+                        # 3. ПРОВЕРКА: если текста мало или мусор → пробуем docling
+                        if is_trash_text(combined_text):
+                            logger.warning(
+                                f"      ⚠️ МАЛО ТЕКСТА на стр. {page_num} файла {file_path.name} ({len(combined_text)} симв.), ПРОБУЕМ DOCLING...")
 
-                        docling_text = self._extract_page_with_docling(file_path, page_num)
-                        if docling_text and not is_trash_text(docling_text):
-                            logger.debug(f"      ✅ Docling дал {len(docling_text)} символов")
-                            combined_text = docling_text
-                        else:
-                            logger.debug(f"      ⚠️ Docling тоже не помог, пробуем OCR...")
+                            docling_text = self._extract_page_with_docling(file_path, page_num)
+                            if docling_text and not is_trash_text(docling_text):
+                                logger.info(f"      ✅ DOCLING УСПЕШЕН: {len(docling_text)} символов")
+                                combined_text = docling_text
+                            else:
+                                logger.warning(f"      ⚠️ DOCLING НЕ ПОМОГ, ПРОБУЕМ OCR...")
 
-                            # 4. OCR ПО КАРТИНКЕ СТРАНИЦЫ
-                            if self.ocr:
-                                ocr_text = self._ocr_page_image(page)
-                                if ocr_text and not is_trash_text(ocr_text):
-                                    logger.debug(f"      ✅ OCR дал {len(ocr_text)} символов")
-                                    combined_text = ocr_text
+                                # 4. OCR ПО КАРТИНКЕ СТРАНИЦЫ
+                                if self.ocr:
+                                    try:
+                                        ocr_text = self._ocr_page_image(page, file_path.name, page_num)
+                                        if ocr_text and not is_trash_text(ocr_text):
+                                            logger.info(f"      ✅ OCR УСПЕШЕН: {len(ocr_text)} символов")
+                                            combined_text = ocr_text
+                                        else:
+                                            logger.warning(f"      ❌ OCR ТОЖЕ НЕ ДАЛ НОРМАЛЬНОГО ТЕКСТА")
+                                    except Exception as e:
+                                        logger.error(f"      ❌ ОШИБКА OCR: {repr(e)}")
                                 else:
-                                    logger.debug(f"      ❌ OCR тоже не дал нормального текста")
+                                    logger.warning(f"      ⚠️ OCR отключен")
 
-                    # Если после всех попыток текста нет — пропускаем страницу
-                    if not combined_text or is_trash_text(combined_text):
-                        logger.warning(f"      ⚠️ Страница {page_num} пустая после всех попыток, пропускаю")
+                        # Если после всех попыток текста нет — пропускаем страницу
+                        if not combined_text or is_trash_text(combined_text):
+                            logger.warning(
+                                f"      ⚠️ СТРАНИЦА {page_num} ФАЙЛА {file_path.name} ПУСТАЯ ПОСЛЕ ВСЕХ ПОПЫТОК, ПРОПУСКАЮ")
+                            continue
+
+                        # 5. ЧИСТКА ЧЕРЕЗ LLM
+                        if ENABLE_TEXT_CLEANING:
+                            logger.info(f"      🧹 Отправка в LLM для чистки...")
+                            cleaned_text = self.text_cleaner.clean_text(
+                                combined_text,
+                                file_name=file_path.name,
+                                page=page_num,
+                            )
+                            logger.info(f"      ✅ LLM ОЧИСТКА: {len(combined_text)} → {len(cleaned_text)} символов")
+                        else:
+                            cleaned_text = combined_text
+                            logger.info(f"      ⚠️ ЧИСТКА LLM ОТКЛЮЧЕНА, использую исходный текст")
+
+                        # 6. ЧАНКИ
+                        logger.info(f"      ✂️ Разделение на чанки...")
+                        chunks = self._split_into_chunks(cleaned_text)
+                        logger.info(f"      ✅ РАЗБИТО НА {len(chunks)} ЧАНКОВ")
+                        total_chunks += len(chunks)
+
+                        for chunk in chunks:
+                            fragments.append({
+                                "content": chunk,
+                                "page": page_num,
+                                "type": "text",
+                                "file": file_path.name,
+                            })
+
+                        successful_pages += 1
+                        logger.info(f"      ✅ СТРАНИЦА {page_num} УСПЕШНО ОБРАБОТАНА")
+
+                    except Exception as e:
+                        logger.error(f"      ❌ КРИТИЧЕСКАЯ ОШИБКА НА СТРАНИЦЕ {page_num}: {repr(e)}")
                         continue
 
-                    # 5. ЧИСТКА ЧЕРЕЗ LLM
-                    logger.debug(f"      🧹 Отправка в LLM для чистки...")
-                    cleaned_text = self.text_cleaner.clean_text(
-                        combined_text,
-                        file_name=file_path.name,
-                        page=page_num,
-                    )
-                    logger.debug(f"      ✅ LLM очистка: {len(combined_text)} → {len(cleaned_text)} символов")
-
-                    # 6. ЧАНКИ
-                    logger.debug(f"      ✂️ Разделение на чанки...")
-                    chunks = self._split_into_chunks(cleaned_text)
-                    logger.debug(f"      ✅ Разбито на {len(chunks)} чанков")
-                    total_chunks += len(chunks)
-
-                    for chunk in chunks:
-                        fragments.append({
-                            "content": chunk,
-                            "page": page_num,
-                            "type": "text",
-                            "file": file_path.name,
-                        })
-
-                    # Логируем каждые 5 страниц
-                    if page_num % 5 == 0:
-                        log_system_stats(f"page_{page_num}")
+                    # Логируем каждую страницу
+                    if page_num % 1 == 0:  # Логируем каждую страницу
+                        log_system_stats(f"{file_path.name}_page_{page_num}")
 
                 elapsed = time.time() - start_time
-                logger.info(f"✅ PDF {file_path.name} обработан за {elapsed:.1f}с")
-                logger.info(f"   📊 Статистика: {processed_pages}/{num_pages} страниц, {total_chunks} чанков")
-                logger.info(
-                    f"   📈 Скорость: {processed_pages / elapsed:.1f} стр/сек, {total_chunks / elapsed:.1f} чанк/сек")
+                logger.info(f"🎉 ФАЙЛ {file_path.name} ОБРАБОТАН ЗА {elapsed:.1f}с")
+                logger.info(f"📊 ИТОГОВАЯ СТАТИСТИКА ДЛЯ {file_path.name}:")
+                logger.info(f"   📄 Обработано страниц: {successful_pages}/{num_pages}")
+                logger.info(f"   📦 Всего чанков: {total_chunks}")
+                logger.info(f"   ⏱️ Общее время: {elapsed:.1f}с")
+                if successful_pages > 0:
+                    logger.info(f"   📈 Среднее время на страницу: {elapsed / successful_pages:.1f}с")
+                    logger.info(f"   📈 Скорость: {successful_pages / elapsed:.1f} стр/сек")
+                logger.info(f"   💾 Фрагментов для индексации: {len(fragments)}")
 
                 return fragments
 
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка при обработке PDF {file_path.name}: {repr(e)}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ ОБРАБОТКЕ PDF {file_path.name}: {repr(e)}")
             return []
 
     def _extract_page_with_docling(self, file_path: Path, page_num: int) -> str:
@@ -282,10 +311,8 @@ class DocumentProcessor:
         if not self.use_docling or not self.docling_converter:
             return ""
 
-        if page_num > MAX_DOCLING_PAGES:
-            return ""
-
         try:
+            logger.info(f"      🧠 Запуск Docling для страницы {page_num}...")
             result = self.docling_converter.convert(str(file_path))
 
             for page in result.document.pages:
@@ -297,60 +324,77 @@ class DocumentProcessor:
                             lines.append(txt)
 
                     if lines:
-                        return "\n".join(lines)
+                        docling_text = "\n".join(lines)
+                        logger.info(f"      ✅ Docling извлек {len(docling_text)} символов")
+                        return docling_text
 
+            logger.info(f"      ⚠️ Docling не нашел текст на странице {page_num}")
             return ""
 
         except Exception as e:
-            logger.error(f"❌ Ошибка Docling при обработке страницы {page_num} файла {file_path.name}: {repr(e)}")
+            logger.error(f"      ❌ Ошибка Docling при обработке страницы {page_num} файла {file_path.name}: {repr(e)}")
             return ""
 
-    def _ocr_page_image(self, page) -> str:
+    def _ocr_page_image(self, page, file_name: str, page_num: int) -> str:
         """OCR страницы через PaddleOCR (из pdfplumber page)"""
         if not self.ocr:
             return ""
 
         try:
             # Конвертируем страницу в изображение
-            logger.debug("    🖼 Преобразование страницы в изображение...")
-            img = page.to_image(resolution=150).original
+            logger.info(f"      🖼 Преобразование страницы {page_num} в изображение...")
+            img = page.to_image(resolution=200).original  # Увеличил разрешение
 
-            logger.debug("    🔠 Запуск PaddleOCR...")
-            result = self.ocr.ocr(img, cls=True)
+            # Конвертируем PIL Image в numpy array
+            import numpy as np
+            img_np = np.array(img)
+
+            # Если изображение имеет альфа-канал, конвертируем в RGB
+            if img_np.shape[2] == 4:
+                img_np = img_np[:, :, :3]
+
+            logger.info(f"      🔠 Запуск PaddleOCR для страницы {page_num}...")
+            result = self.ocr.ocr(img_np, cls=True)
 
             if not result or not result[0]:
-                logger.debug("    ⚠️ OCR не нашёл текста на странице")
+                logger.info(f"      ⚠️ OCR не нашёл текста на странице {page_num}")
                 return ""
 
             lines = []
             for line in result[0]:
-                text = line[1][0] if len(line) > 1 else ""
-                if text:
-                    lines.append(text)
+                if len(line) > 1:
+                    text = line[1][0]
+                    if text and text.strip():
+                        lines.append(text.strip())
 
             ocr_text = "\n".join(lines)
-            logger.debug(f"    ✅ OCR извлёк {len(ocr_text)} символов")
+            logger.info(f"      ✅ OCR извлёк {len(ocr_text)} символов с страницы {page_num}")
             return ocr_text
 
-        except AssertionError as e:
-            logger.error(f"❌ AssertionError в OCR: {repr(e)}")
-            return ""
         except Exception as e:
-            logger.error(f"❌ Ошибка OCR: {repr(e)}")
+            logger.error(f"      ❌ Ошибка OCR на странице {page_num}: {repr(e)}")
             return ""
 
     def _format_tables(self, tables) -> str:
         """Форматирование таблиц в текст"""
         parts = []
-        for t in tables:
-            for row in t:
-                row = [str(cell).strip() if cell else "" for cell in row]
-                parts.append(" | ".join(row))
-            parts.append("\n")
+        for table_idx, table in enumerate(tables, 1):
+            try:
+                for row_idx, row in enumerate(table):
+                    row_text = []
+                    for cell_idx, cell in enumerate(row):
+                        if cell:
+                            cell_text = str(cell).strip()
+                            row_text.append(cell_text)
+                    if row_text:
+                        parts.append(" | ".join(row_text))
+                parts.append("")  # Пустая строка между таблицами
+            except Exception as e:
+                logger.warning(f"      ⚠️ Ошибка форматирования таблицы {table_idx}: {repr(e)}")
         return "\n".join(parts)
 
     def _process_docx(self, file_path: Path) -> List[Dict]:
-        """Простейшая обработка DOCX"""
+        """Обработка DOCX"""
         try:
             from docx import Document
         except ImportError:
@@ -361,7 +405,7 @@ class DocumentProcessor:
         start_time = time.time()
 
         try:
-            logger.info(f"📄 Начинаю обработку DOCX: {file_path.name}")
+            logger.info(f"📄 НАЧИНАЮ ОБРАБОТКУ DOCX: {file_path.name}")
 
             doc = Document(str(file_path))
             full_text = []
@@ -376,16 +420,20 @@ class DocumentProcessor:
                 logger.warning(f"⚠️ DOCX {file_path.name} пустой")
                 return []
 
-            logger.debug(f"   📝 Исходный текст: {len(combined)} символов")
+            logger.info(f"   📝 Исходный текст: {len(combined)} символов")
 
-            cleaned_text = self.text_cleaner.clean_text(
-                combined,
-                file_name=file_path.name,
-                page=1,
-            )
-            logger.debug(f"   ✅ LLM очистка: {len(combined)} → {len(cleaned_text)} символов")
+            if ENABLE_TEXT_CLEANING:
+                cleaned_text = self.text_cleaner.clean_text(
+                    combined,
+                    file_name=file_path.name,
+                    page=1,
+                )
+                logger.info(f"   ✅ LLM очистка: {len(combined)} → {len(cleaned_text)} символов")
+            else:
+                cleaned_text = combined
+                logger.info(f"   ⚠️ ЧИСТКА LLM ОТКЛЮЧЕНА")
 
-            logger.debug(f"   ✂️ Разделение на чанки...")
+            logger.info(f"   ✂️ Разделение на чанки...")
             chunks = self._split_into_chunks(cleaned_text)
 
             for chunk in chunks:
@@ -398,8 +446,8 @@ class DocumentProcessor:
 
             elapsed = time.time() - start_time
             logger.info(f"✅ DOCX {file_path.name} обработан за {elapsed:.1f}с")
-            logger.info(f"   📊 Статистика: {len(chunks)} чанков")
-            logger.info(f"   📈 Скорость: {len(chunks) / elapsed:.1f} чанк/сек")
+            logger.info(f"📊 Статистика: {len(chunks)} чанков")
+            logger.info(f"📈 Скорость: {len(chunks) / elapsed:.1f} чанк/сек")
 
             return fragments
 
@@ -408,7 +456,7 @@ class DocumentProcessor:
             return []
 
     def _split_into_chunks(self, text: str) -> List[str]:
-        """Режем текст на чанки с логированием"""
+        """Режем текст на чанки с детальным логированием"""
         if not text:
             return []
 
@@ -416,8 +464,10 @@ class DocumentProcessor:
         start = 0
         length = len(text)
 
-        logger.debug(
-            f"      ✂️ Длина текста: {length} символов, CHUNK_SIZE={CHUNK_SIZE}, CHUNK_OVERLAP={CHUNK_OVERLAP}")
+        logger.info(f"      ✂️ Начинаю разделение текста на чанки:")
+        logger.info(f"         Длина текста: {length} символов")
+        logger.info(f"         CHUNK_SIZE: {CHUNK_SIZE}")
+        logger.info(f"         CHUNK_OVERLAP: {CHUNK_OVERLAP}")
 
         chunk_num = 1
         while start < length:
@@ -426,10 +476,17 @@ class DocumentProcessor:
 
             if chunk:
                 chunks.append(chunk)
-                logger.debug(f"      📦 Чанк {chunk_num}: позиции {start}-{end} ({len(chunk)} символов)")
+                logger.info(f"         📦 Чанк {chunk_num}: позиции {start}-{end} ({len(chunk)} символов)")
                 chunk_num += 1
 
             start += CHUNK_SIZE - CHUNK_OVERLAP
 
-        logger.debug(f"      ✅ Создано {len(chunks)} чанков")
+        logger.info(f"      ✅ Создано {len(chunks)} чанков")
+
+        # Логируем примеры чанков
+        if chunks:
+            for i, chunk in enumerate(chunks[:3]):  # Показываем первые 3 чанка
+                preview = chunk[:100] + "..." if len(chunk) > 100 else chunk
+                logger.info(f"         📄 Чанк {i + 1} превью: '{preview}'")
+
         return chunks
