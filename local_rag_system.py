@@ -1,7 +1,9 @@
 import logging
+import json
+import time
+import psutil
 from pathlib import Path
 from typing import List, Dict, Optional
-import json
 
 from tqdm import tqdm
 
@@ -54,16 +56,19 @@ class RAGSystem:
     def index_documents(self, continue_indexing: bool = True):
         """
         Индексация документов из папки documents/
-
-        Args:
-            continue_indexing: True = продолжить с последнего, False = переиндексация с нуля
         """
+        import psutil
+        import time
+
         if self._indexing:
             logger.warning("⚠️ Индексация уже выполняется")
             return
 
         self._indexing = True
         self._stop_indexing = False
+
+        process_start = time.time()
+        process = psutil.Process()
 
         try:
             if not continue_indexing:
@@ -87,14 +92,20 @@ class RAGSystem:
                 return
 
             logger.info(f"📚 Найдено файлов для индексации: {len(files)}")
+            logger.info(f"📊 Начинаю индексацию (continue={continue_indexing})")
+            logger.info(f"💾 Память в начале: {process.memory_info().rss / 1024 / 1024:.1f}MB")
+
+            total_fragments = 0
+            total_files_processed = 0
 
             # Обрабатываем файлы
-            for file_path in tqdm(files, desc="Индексация"):
+            for file_idx, file_path in enumerate(tqdm(files, desc="Индексация"), 1):
                 if self._stop_indexing:
                     logger.info("🛑 Индексация остановлена пользователем")
                     break
 
-                logger.info(f"📄 Обработка: {file_path.name}")
+                logger.info(f"\n📁 Файл {file_idx}/{len(files)}: {file_path.name}")
+                file_start = time.time()
 
                 # Извлекаем фрагменты
                 fragments = self.document_processor.process_file(file_path)
@@ -104,18 +115,43 @@ class RAGSystem:
                     continue
 
                 # Добавляем в векторную БД
+                logger.info(f"   📤 Загрузка {len(fragments)} фрагментов в векторную БД...")
+                db_start = time.time()
                 self.vector_store.add_documents(fragments)
+                db_time = time.time() - db_start
 
                 # Помечаем как проиндексированный
                 self.indexed_files.append(file_path.name)
                 self._save_indexed_files()
 
-                logger.info(f"✅ {file_path.name}: добавлено {len(fragments)} фрагментов")
+                total_fragments += len(fragments)
+                total_files_processed += 1
 
-            logger.info("✅ Индексация завершена!")
+                file_time = time.time() - file_start
+                memory_usage = process.memory_info().rss / 1024 / 1024
+
+                logger.info(f"✅ {file_path.name}:")
+                logger.info(f"   📊 {len(fragments)} фрагментов")
+                logger.info(f"   ⏱️ Время: {file_time:.1f}с (БД: {db_time:.1f}с)")
+                logger.info(f"   💾 Память: {memory_usage:.1f}MB")
+                logger.info(f"   📈 Средняя скорость: {len(fragments) / file_time:.1f} фрагм/сек")
+
+            total_time = time.time() - process_start
+            final_memory = process.memory_info().rss / 1024 / 1024
+
+            logger.info(f"\n🎉 Индексация завершена!")
+            logger.info(f"📊 Итоговая статистика:")
+            logger.info(f"   📁 Файлов обработано: {total_files_processed}/{len(files)}")
+            logger.info(f"   📄 Всего фрагментов: {total_fragments}")
+            logger.info(f"   ⏱️ Общее время: {total_time:.1f}с")
+            logger.info(f"   📈 Средняя скорость: {total_fragments / total_time:.1f} фрагм/сек")
+            logger.info(f"   💾 Память после: {final_memory:.1f}MB")
+
+            if total_files_processed > 0:
+                logger.info(f"   📊 Среднее на файл: {total_fragments / total_files_processed:.1f} фрагментов")
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при индексации: {repr(e)}")
+            logger.error(f"❌ Критическая ошибка при индексации: {repr(e)}")
             raise
 
         finally:
@@ -340,6 +376,7 @@ class RAGSystem:
             "indexed_files_list": self.indexed_files,
             "total_documents": vector_stats.get("total_documents", 0),
             "vector_size": vector_stats.get("vector_size", 0),
+            "embedding_model": vector_stats.get("model", "unknown"),
         }
 
     def test_connection(self) -> Dict[str, str]:
@@ -350,16 +387,15 @@ class RAGSystem:
         try:
             ok = self.ollama.test_connection()
             if ok:
-                results.append("✅ Ollama: подключение успешно, модель доступна.")
+                results.append(f"✅ Ollama: подключение успешно, модель {self.ollama.model} доступна.")
             else:
-                results.append("❌ Ollama: не удалось подтвердить доступность модели.")
+                results.append(f"❌ Ollama: не удалось подтвердить доступность модели {self.ollama.model}.")
         except Exception as e:
             results.append(f"❌ Ollama: ошибка подключения: {repr(e)}")
 
         # 2. Тест Qdrant
         try:
             qdrant_test = self.vector_store.test_connection()
-            # здесь у тебя, скорее всего, уже dict с message
             if isinstance(qdrant_test, dict) and "message" in qdrant_test:
                 results.append(qdrant_test["message"])
             else:
@@ -368,5 +404,3 @@ class RAGSystem:
             results.append(f"❌ Qdrant: ошибка подключения: {repr(e)}")
 
         return {"message": "\n\n".join(results)}
-
-    #

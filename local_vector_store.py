@@ -1,30 +1,34 @@
 import logging
 from typing import List, Dict
 import uuid
+import time
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
 
 from local_config import QDRANT_URL, QDRANT_COLLECTION
+from local_embeddings import EmbeddingManager
 
 logger = logging.getLogger(__name__)
 
 
 class VectorStore:
-    """Векторное хранилище на базе Qdrant"""
+    """Векторное хранилище на базе Qdrant с улучшенным EmbeddingManager"""
 
-    def __init__(self):
+    def __init__(self, embedding_model: str = None):
         self.client = QdrantClient(url=QDRANT_URL)
         self.collection_name = QDRANT_COLLECTION
 
-        # Модель эмбеддингов
-        self.embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-        self.vector_size = self.embedding_model.get_sentence_embedding_dimension()
+        # Используем EmbeddingManager
+        self.embedding_manager = EmbeddingManager(embedding_model)
+        self.vector_size = self.embedding_manager.get_embedding_dimension()
 
         self._ensure_collection()
 
-        logger.info(f"✅ VectorStore инициализирован: {QDRANT_URL}, коллекция: {self.collection_name}")
+        logger.info(f"✅ VectorStore инициализирован: {QDRANT_URL}")
+        logger.info(f"   📊 Коллекция: {self.collection_name}")
+        logger.info(f"   🔤 Модель: {self.embedding_manager.model_name}")
+        logger.info(f"   📐 Размерность: {self.vector_size}")
 
     def _ensure_collection(self):
         """Создание коллекции, если её нет"""
@@ -41,31 +45,51 @@ class VectorStore:
             else:
                 logger.info(f"✅ Коллекция {self.collection_name} уже существует")
 
+                # Проверяем размерность
+                info = self.client.get_collection(self.collection_name)
+                existing_size = info.config.params.vectors.size
+                if existing_size != self.vector_size:
+                    logger.warning(f"⚠️ Размерность не совпадает: БД={existing_size}, модель={self.vector_size}")
+                    logger.warning("   Требуется переиндексация с /reindex")
+
         except Exception as e:
             logger.error(f"❌ Ошибка при проверке/создании коллекции: {repr(e)}")
             raise
 
     def add_documents(self, documents: List[Dict]):
-        """Добавление документов в векторное хранилище"""
+        """Добавление документов в векторное хранилище с логированием"""
         if not documents:
             return
 
+        logger.info(f"📤 Загрузка {len(documents)} документов в Qdrant...")
+        start_time = time.time()
+
         try:
             points = []
+            texts_to_encode = []
+            indices_to_encode = []
 
-            for doc in documents:
+            # Подготовка данных для батч-кодирования
+            for i, doc in enumerate(documents):
                 content = doc.get("content", "")
                 if not content:
                     continue
 
-                # Генерируем эмбеддинг
-                embedding = self.embedding_model.encode(content).tolist()
+                texts_to_encode.append(content)
+                indices_to_encode.append(i)
 
+            # Батч-кодирование
+            logger.debug(f"🔤 Кодирование {len(texts_to_encode)} текстов...")
+            embeddings = self.embedding_manager.encode(texts_to_encode, batch_size=32)
+
+            # Создание точек
+            for idx, doc_idx in enumerate(indices_to_encode):
+                doc = documents[doc_idx]
                 point = PointStruct(
                     id=str(uuid.uuid4()),
-                    vector=embedding,
+                    vector=embeddings[idx].tolist(),
                     payload={
-                        "content": content,
+                        "content": doc.get("content", ""),
                         "file": doc.get("file", ""),
                         "page": doc.get("page", 0),
                         "type": doc.get("type", "text"),
@@ -74,11 +98,19 @@ class VectorStore:
                 points.append(point)
 
             if points:
+                # Загрузка в Qdrant
+                upload_start = time.time()
                 self.client.upsert(
                     collection_name=self.collection_name,
                     points=points,
                 )
+                upload_time = time.time() - upload_start
+
+                total_time = time.time() - start_time
                 logger.info(f"✅ Добавлено {len(points)} документов в Qdrant")
+                logger.info(
+                    f"   ⏱️ Время: {total_time:.1f}с (кодирование: {total_time - upload_time:.1f}с, загрузка: {upload_time:.1f}с)")
+                logger.info(f"   📈 Скорость: {len(points) / total_time:.1f} док/сек")
 
         except Exception as e:
             logger.error(f"❌ Ошибка при добавлении документов: {repr(e)}")
@@ -86,9 +118,12 @@ class VectorStore:
 
     def search(self, query: str, top_k: int = 5) -> List[Dict]:
         """Поиск релевантных документов"""
+        logger.debug(f"🔍 Поиск: '{query[:50]}...', top_k={top_k}")
+        search_start = time.time()
+
         try:
             # Генерируем эмбеддинг запроса
-            query_embedding = self.embedding_model.encode(query).tolist()
+            query_embedding = self.embedding_manager.encode(query, use_cache=False)[0].tolist()
 
             # Поиск в Qdrant
             results = self.client.search(
@@ -106,6 +141,9 @@ class VectorStore:
                     "score": result.score,
                 })
 
+            search_time = time.time() - search_start
+            logger.debug(f"✅ Найдено {len(documents)} документов за {search_time * 1000:.0f}мс")
+
             return documents
 
         except Exception as e:
@@ -114,10 +152,14 @@ class VectorStore:
 
     def clear_collection(self):
         """Очистка коллекции"""
+        logger.warning("🗑️ Очистка векторной коллекции...")
         try:
             self.client.delete_collection(collection_name=self.collection_name)
+            # Ждем немного
+            import time
+            time.sleep(1)
             self._ensure_collection()
-            logger.info(f"✅ Коллекция {self.collection_name} очищена")
+            logger.info(f"✅ Коллекция {self.collection_name} очищена и пересоздана")
         except Exception as e:
             logger.error(f"❌ Ошибка при очистке коллекции: {repr(e)}")
             raise
@@ -129,22 +171,30 @@ class VectorStore:
             return {
                 "total_documents": info.points_count,
                 "vector_size": info.config.params.vectors.size,
+                "model": self.embedding_manager.model_name,
             }
         except Exception as e:
             logger.error(f"❌ Ошибка при получении статистики: {repr(e)}")
-            return {"total_documents": 0, "vector_size": 0}
+            return {"total_documents": 0, "vector_size": 0, "model": "unknown"}
 
     def test_connection(self) -> Dict[str, str]:
         """Тест подключения к Qdrant"""
         try:
             collections = self.client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+
+            msg = f"✅ Qdrant: подключение OK\n"
+            msg += f"   📚 Коллекций: {len(collections.collections)}\n"
+            msg += f"   🔤 Текущая коллекция: {self.collection_name} ({'существует' if self.collection_name in collection_names else 'не найдена'})\n"
+            msg += f"   🧮 Модель эмбеддингов: {self.embedding_manager.model_name}\n"
+            msg += f"   📐 Размерность: {self.vector_size}"
+
             return {
                 "status": "ok",
-                "message": f"✅ Qdrant: подключение OK\n   Коллекций: {len(collections.collections)}",
+                "message": msg,
             }
         except Exception as e:
             return {
                 "status": "error",
                 "message": f"❌ Qdrant: ошибка подключения\n   {str(e)}\n   Проверь, запущен ли Qdrant (docker-compose up -d)",
             }
-#

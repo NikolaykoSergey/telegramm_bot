@@ -1,5 +1,7 @@
 import logging
 import re
+import time
+import psutil
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Пытаемся подключить PaddleOCR
 try:
     from paddleocr import PaddleOCR
+
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     PADDLEOCR_AVAILABLE = False
@@ -32,10 +35,20 @@ except ImportError:
 # Пытаемся подключить Docling
 try:
     from docling.document_converter import DocumentConverter
+
     DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
     logging.warning("⚠️ Docling не установлен, функционал Docling будет отключён.")
+
+
+def log_system_stats(stage: str):
+    """Логирование системных ресурсов"""
+    process = psutil.Process()
+    memory = process.memory_info().rss / 1024 / 1024  # MB
+    cpu_percent = process.cpu_percent(interval=0.1)
+
+    logger.debug(f"📊 [{stage}] Память: {memory:.1f}MB, CPU: {cpu_percent:.1f}%")
 
 
 def is_trash_text(text: str) -> bool:
@@ -83,13 +96,20 @@ class TextCleaner:
         user_prompt = f"Файл: {file_name}, страница: {page}\n\nТекст:\n{text}"
 
         try:
+            logger.debug(f"🧹 Отправка в LLM для чистки ({len(text)} символов)...")
+            start_time = time.time()
             cleaned = self.ollama.generate(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.1,
-                max_tokens=512,
+                max_tokens=1024,
             )
-            return cleaned.strip()
+            clean_time = time.time() - start_time
+
+            cleaned = cleaned.strip()
+            logger.debug(f"✅ LLM очистка: {len(text)} → {len(cleaned)} символов за {clean_time:.1f}с")
+
+            return cleaned
         except Exception as e:
             logger.error(f"❌ Ошибка чистки текста через LLM: {repr(e)}")
             return text
@@ -157,18 +177,25 @@ class DocumentProcessor:
         5) чанки → векторизация
         """
         fragments = []
+        start_time = time.time()
 
         try:
             with pdfplumber.open(file_path) as pdf:
                 num_pages = len(pdf.pages)
-                logger.info(f"📄 PDF: {file_path.name}, страниц: {num_pages}")
+                logger.info(f"📄 Начинаю обработку PDF: {file_path.name}, страниц: {num_pages}")
+                log_system_stats("pdf_start")
+
+                processed_pages = 0
+                total_chunks = 0
 
                 for page_num, page in enumerate(pdf.pages, start=1):
-                    logger.debug(f"   Обработка страницы {page_num}/{num_pages}...")
+                    processed_pages += 1
+                    logger.debug(f"   📄 Страница {page_num}/{num_pages}: извлечение текста...")
 
                     # 1. БАЗОВЫЙ ТЕКСТ (pdfplumber)
                     text = page.extract_text() or ""
                     text = text.strip()
+                    logger.debug(f"      📝 Исходный текст: {len(text)} символов")
 
                     # 2. ТАБЛИЦЫ
                     tables_text = ""
@@ -176,21 +203,23 @@ class DocumentProcessor:
                         tables = page.extract_tables()
                         if tables:
                             tables_text = self._format_tables(tables)
-                            logger.debug(f"      ✅ Найдено таблиц: {len(tables)}")
+                            logger.debug(f"      📊 Найдено таблиц: {len(tables)}")
 
                     # Объединяем базовый текст + таблицы
                     combined_text = "\n\n".join(part for part in [text, tables_text] if part and part.strip()).strip()
+                    logger.debug(f"      🔗 Объединенный текст: {len(combined_text)} символов")
 
                     # 3. ПРОВЕРКА: если текста мало или мусор → пробуем docling
                     if is_trash_text(combined_text):
-                        logger.debug(f"      ⚠️ Мало текста ({len(combined_text)} симв.), пробуем docling...")
+                        logger.warning(
+                            f"      ⚠️ Мало текста на стр. {page_num} ({len(combined_text)} симв.), пробуем docling...")
 
                         docling_text = self._extract_page_with_docling(file_path, page_num)
                         if docling_text and not is_trash_text(docling_text):
                             logger.debug(f"      ✅ Docling дал {len(docling_text)} символов")
                             combined_text = docling_text
                         else:
-                            logger.debug(f"      ⚠️ Docling тоже не помог, идём в OCR...")
+                            logger.debug(f"      ⚠️ Docling тоже не помог, пробуем OCR...")
 
                             # 4. OCR ПО КАРТИНКЕ СТРАНИЦЫ
                             if self.ocr:
@@ -203,18 +232,23 @@ class DocumentProcessor:
 
                     # Если после всех попыток текста нет — пропускаем страницу
                     if not combined_text or is_trash_text(combined_text):
-                        logger.debug(f"      ⚠️ Страница {page_num} пустая после всех попыток, пропускаю")
+                        logger.warning(f"      ⚠️ Страница {page_num} пустая после всех попыток, пропускаю")
                         continue
 
                     # 5. ЧИСТКА ЧЕРЕЗ LLM
+                    logger.debug(f"      🧹 Отправка в LLM для чистки...")
                     cleaned_text = self.text_cleaner.clean_text(
                         combined_text,
                         file_name=file_path.name,
                         page=page_num,
                     )
+                    logger.debug(f"      ✅ LLM очистка: {len(combined_text)} → {len(cleaned_text)} символов")
 
                     # 6. ЧАНКИ
+                    logger.debug(f"      ✂️ Разделение на чанки...")
                     chunks = self._split_into_chunks(cleaned_text)
+                    logger.debug(f"      ✅ Разбито на {len(chunks)} чанков")
+                    total_chunks += len(chunks)
 
                     for chunk in chunks:
                         fragments.append({
@@ -224,11 +258,20 @@ class DocumentProcessor:
                             "file": file_path.name,
                         })
 
-                logger.info(f"✅ PDF {file_path.name}: извлечено {len(fragments)} фрагментов")
+                    # Логируем каждые 5 страниц
+                    if page_num % 5 == 0:
+                        log_system_stats(f"page_{page_num}")
+
+                elapsed = time.time() - start_time
+                logger.info(f"✅ PDF {file_path.name} обработан за {elapsed:.1f}с")
+                logger.info(f"   📊 Статистика: {processed_pages}/{num_pages} страниц, {total_chunks} чанков")
+                logger.info(
+                    f"   📈 Скорость: {processed_pages / elapsed:.1f} стр/сек, {total_chunks / elapsed:.1f} чанк/сек")
+
                 return fragments
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при обработке PDF {file_path.name}: {repr(e)}")
+            logger.error(f"❌ Критическая ошибка при обработке PDF {file_path.name}: {repr(e)}")
             return []
 
     def _extract_page_with_docling(self, file_path: Path, page_num: int) -> str:
@@ -315,7 +358,11 @@ class DocumentProcessor:
             return []
 
         fragments = []
+        start_time = time.time()
+
         try:
+            logger.info(f"📄 Начинаю обработку DOCX: {file_path.name}")
+
             doc = Document(str(file_path))
             full_text = []
 
@@ -326,15 +373,21 @@ class DocumentProcessor:
 
             combined = "\n".join(full_text).strip()
             if not combined:
+                logger.warning(f"⚠️ DOCX {file_path.name} пустой")
                 return []
+
+            logger.debug(f"   📝 Исходный текст: {len(combined)} символов")
 
             cleaned_text = self.text_cleaner.clean_text(
                 combined,
                 file_name=file_path.name,
                 page=1,
             )
+            logger.debug(f"   ✅ LLM очистка: {len(combined)} → {len(cleaned_text)} символов")
 
+            logger.debug(f"   ✂️ Разделение на чанки...")
             chunks = self._split_into_chunks(cleaned_text)
+
             for chunk in chunks:
                 fragments.append({
                     "content": chunk,
@@ -343,7 +396,11 @@ class DocumentProcessor:
                     "file": file_path.name,
                 })
 
-            logger.info(f"✅ DOCX {file_path.name}: извлечено {len(fragments)} фрагментов")
+            elapsed = time.time() - start_time
+            logger.info(f"✅ DOCX {file_path.name} обработан за {elapsed:.1f}с")
+            logger.info(f"   📊 Статистика: {len(chunks)} чанков")
+            logger.info(f"   📈 Скорость: {len(chunks) / elapsed:.1f} чанк/сек")
+
             return fragments
 
         except Exception as e:
@@ -351,7 +408,7 @@ class DocumentProcessor:
             return []
 
     def _split_into_chunks(self, text: str) -> List[str]:
-        """Режем текст на чанки"""
+        """Режем текст на чанки с логированием"""
         if not text:
             return []
 
@@ -359,11 +416,20 @@ class DocumentProcessor:
         start = 0
         length = len(text)
 
+        logger.debug(
+            f"      ✂️ Длина текста: {length} символов, CHUNK_SIZE={CHUNK_SIZE}, CHUNK_OVERLAP={CHUNK_OVERLAP}")
+
+        chunk_num = 1
         while start < length:
             end = min(start + CHUNK_SIZE, length)
             chunk = text[start:end].strip()
+
             if chunk:
                 chunks.append(chunk)
+                logger.debug(f"      📦 Чанк {chunk_num}: позиции {start}-{end} ({len(chunk)} символов)")
+                chunk_num += 1
+
             start += CHUNK_SIZE - CHUNK_OVERLAP
 
+        logger.debug(f"      ✅ Создано {len(chunks)} чанков")
         return chunks
