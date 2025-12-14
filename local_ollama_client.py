@@ -79,4 +79,4 @@ class OllamaClient:
             logger.error(f"❌ Ошибка подключения к Ollama: {repr(e)}")
             return False
 
-#
+#oij
