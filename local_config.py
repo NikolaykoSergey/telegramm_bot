@@ -81,5 +81,3 @@ def check_config() -> bool:
     print(f"   • История диалога: до {MAX_HISTORY_CHARS} символов")
 
     return ok
-
-#лщт

@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -35,6 +36,28 @@ try:
 except ImportError:
     DOCLING_AVAILABLE = False
     logging.warning("⚠️ Docling не установлен, функционал Docling будет отключён.")
+
+
+def is_trash_text(text: str) -> bool:
+    """
+    Проверка, годится ли текст для индексации.
+    Возвращает True, если текст — мусор (слишком мало, битая кодировка, артефакты).
+    """
+    if not text:
+        return True
+
+    cleaned = text.strip()
+    if len(cleaned) < 200:  # менее 200 символов — мало для мануала
+        return True
+
+    # Доля нормальных букв vs остального
+    letters = re.findall(r"[A-Za-zА-Яа-яЁё]", cleaned)
+    ratio = len(letters) / max(len(cleaned), 1)
+    if ratio < 0.3:
+        # меньше 30% букв — похоже на мусор
+        return True
+
+    return False
 
 
 class TextCleaner:
@@ -125,13 +148,15 @@ class DocumentProcessor:
             return []
 
     def _process_pdf(self, file_path: Path) -> List[Dict]:
-        """Гибридная обработка PDF (+ Docling, + OCR)"""
+        """
+        Робастная обработка PDF по схеме:
+        1) pdfplumber (текст + таблицы)
+        2) если мало текста → docling
+        3) если и docling не дал → OCR по картинкам страниц
+        4) чистка через LLM
+        5) чанки → векторизация
+        """
         fragments = []
-
-        # Docling по всему документу (странично)
-        docling_page_texts: Optional[Dict[int, str]] = None
-        if self.use_docling:
-            docling_page_texts = self._extract_with_docling(file_path)
 
         try:
             with pdfplumber.open(file_path) as pdf:
@@ -141,11 +166,11 @@ class DocumentProcessor:
                 for page_num, page in enumerate(pdf.pages, start=1):
                     logger.debug(f"   Обработка страницы {page_num}/{num_pages}...")
 
-                    # 1. Текст через pdfplumber
+                    # 1. БАЗОВЫЙ ТЕКСТ (pdfplumber)
                     text = page.extract_text() or ""
                     text = text.strip()
 
-                    # 2. Таблицы
+                    # 2. ТАБЛИЦЫ
                     tables_text = ""
                     if ENABLE_TABLES:
                         tables = page.extract_tables()
@@ -153,35 +178,42 @@ class DocumentProcessor:
                             tables_text = self._format_tables(tables)
                             logger.debug(f"      ✅ Найдено таблиц: {len(tables)}")
 
-                    # 3. OCR, если текста мало
-                    ocr_text = ""
-                    if self.ocr and len(text) < 300:
-                        logger.debug(f"      🔍 Мало текста ({len(text)} симв.), запускаю OCR...")
-                        ocr_text = self._ocr_page_image(page)
+                    # Объединяем базовый текст + таблицы
+                    combined_text = "\n\n".join(part for part in [text, tables_text] if part and part.strip()).strip()
 
-                    # 4. Docling текст для этой страницы
-                    docling_text = ""
-                    if docling_page_texts and page_num in docling_page_texts:
-                        docling_text = docling_page_texts[page_num]
-                        logger.debug(f"      📑 Docling: добавлено {len(docling_text)} символов")
+                    # 3. ПРОВЕРКА: если текста мало или мусор → пробуем docling
+                    if is_trash_text(combined_text):
+                        logger.debug(f"      ⚠️ Мало текста ({len(combined_text)} симв.), пробуем docling...")
 
-                    # 5. Объединяем всё
-                    combined_text = "\n\n".join(
-                        part for part in [text, tables_text, ocr_text, docling_text] if part and part.strip()
-                    ).strip()
+                        docling_text = self._extract_page_with_docling(file_path, page_num)
+                        if docling_text and not is_trash_text(docling_text):
+                            logger.debug(f"      ✅ Docling дал {len(docling_text)} символов")
+                            combined_text = docling_text
+                        else:
+                            logger.debug(f"      ⚠️ Docling тоже не помог, идём в OCR...")
 
-                    if not combined_text:
-                        logger.debug(f"      ⚠️ Страница {page_num} пустая, пропускаю")
+                            # 4. OCR ПО КАРТИНКЕ СТРАНИЦЫ
+                            if self.ocr:
+                                ocr_text = self._ocr_page_image(page)
+                                if ocr_text and not is_trash_text(ocr_text):
+                                    logger.debug(f"      ✅ OCR дал {len(ocr_text)} символов")
+                                    combined_text = ocr_text
+                                else:
+                                    logger.debug(f"      ❌ OCR тоже не дал нормального текста")
+
+                    # Если после всех попыток текста нет — пропускаем страницу
+                    if not combined_text or is_trash_text(combined_text):
+                        logger.debug(f"      ⚠️ Страница {page_num} пустая после всех попыток, пропускаю")
                         continue
 
-                    # 6. Чистка через LLM
+                    # 5. ЧИСТКА ЧЕРЕЗ LLM
                     cleaned_text = self.text_cleaner.clean_text(
                         combined_text,
                         file_name=file_path.name,
                         page=page_num,
                     )
 
-                    # 7. Чанки
+                    # 6. ЧАНКИ
                     chunks = self._split_into_chunks(cleaned_text)
 
                     for chunk in chunks:
@@ -199,48 +231,40 @@ class DocumentProcessor:
             logger.error(f"❌ Ошибка при обработке PDF {file_path.name}: {repr(e)}")
             return []
 
-    def _extract_with_docling(self, file_path: Path) -> Optional[Dict[int, str]]:
+    def _extract_page_with_docling(self, file_path: Path, page_num: int) -> str:
         """
-        Извлечение текста с помощью Docling по страницам.
-        Возвращает dict: {page_num: text}
+        Извлечение текста одной страницы через Docling.
+        Возвращает текст страницы или пустую строку.
         """
         if not self.use_docling or not self.docling_converter:
-            return None
+            return ""
+
+        if page_num > MAX_DOCLING_PAGES:
+            return ""
 
         try:
-            logger.info(f"📑 Docling: конвертация файла {file_path.name}")
             result = self.docling_converter.convert(str(file_path))
 
-            page_texts: Dict[int, str] = {}
-
             for page in result.document.pages:
-                page_num = page.page_number or 0
-                if page_num == 0:
-                    continue
+                if page.page_number == page_num:
+                    lines = []
+                    for block in page.blocks:
+                        txt = block.to_text().strip()
+                        if txt:
+                            lines.append(txt)
 
-                if page_num > MAX_DOCLING_PAGES:
-                    continue
+                    if lines:
+                        return "\n".join(lines)
 
-                lines = []
-                for block in page.blocks:
-                    txt = block.to_text().strip()
-                    if txt:
-                        lines.append(txt)
-
-                if lines:
-                    page_texts[page_num] = "\n".join(lines)
-
-            logger.info(f"📑 Docling: получено страниц с текстом: {len(page_texts)}")
-            return page_texts if page_texts else None
+            return ""
 
         except Exception as e:
-            logger.error(f"❌ Ошибка Docling при обработке {file_path.name}: {repr(e)}")
-            return None
+            logger.error(f"❌ Ошибка Docling при обработке страницы {page_num} файла {file_path.name}: {repr(e)}")
+            return ""
 
     def _ocr_page_image(self, page) -> str:
         """OCR страницы через PaddleOCR (из pdfplumber page)"""
         if not self.ocr:
-            logger.debug("    ⚠️ OCR выключен (self.ocr is None)")
             return ""
 
         try:
@@ -343,4 +367,3 @@ class DocumentProcessor:
             start += CHUNK_SIZE - CHUNK_OVERLAP
 
         return chunks
-#km
