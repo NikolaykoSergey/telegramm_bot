@@ -14,18 +14,11 @@ import re
 import asyncio
 from golden_dataset_manager import GoldenDatasetManager
 from telegram.ext import ApplicationBuilder
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -73,29 +66,6 @@ def get_feedback_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("👍 Помог"), KeyboardButton("👎 Не помог")],
     ]
     return ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-
-
-def get_clarification_inline_keyboard(questions: list) -> InlineKeyboardMarkup:
-    """Инлайн-кнопки для выбора уточняющего вопроса"""
-    buttons = []
-
-    for i, q in enumerate(questions, 1):
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{i}. {q[:40]}{'...' if len(q) > 40 else ''}",
-                callback_data=f"clarify_{i}"
-            )
-        ])
-
-    # Кнопка "свой вариант"
-    buttons.append([
-        InlineKeyboardButton(
-            text="✍️ Ввести свой уточняющий вопрос",
-            callback_data="clarify_custom"
-        )
-    ])
-
-    return InlineKeyboardMarkup(buttons)
 
 
 def init_user_data(context: ContextTypes.DEFAULT_TYPE):
@@ -354,7 +324,6 @@ async def handle_feedback_not_helpful(update: Update, context: ContextTypes.DEFA
         reply_markup=get_main_keyboard(),
     )
 
-
 async def correct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /correct для корректировки ответа"""
     last_response = context.user_data.get("last_bot_response")
@@ -376,7 +345,6 @@ async def correct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Напишите ПРАВИЛЬНЫЙ ответ (или /cancel для отмены):"
     )
 
-
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена текущей операции"""
     context.user_data["awaiting_correction"] = False
@@ -387,7 +355,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❌ Операция отменена.",
         reply_markup=get_main_keyboard()
     )
-
 
 async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /reindex"""
@@ -520,7 +487,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_clarification_response(update: Update, context: ContextTypes.DEFAULT_TYPE, response: str):
-    """Обработка текстового ответа на уточняющий вопрос (цифра или свой текст)"""
+    """Обработка ответа на уточняющий вопрос"""
     clarification_questions = context.user_data.get('clarification_questions', [])
     original_query = context.user_data.get('original_query')
 
@@ -544,7 +511,6 @@ async def handle_clarification_response(update: Update, context: ContextTypes.DE
                 f"❌ Неверный номер. Выберите от 1 до {len(clarification_questions)}",
             )
     else:
-        # Пользователь ввёл свой текст
         context.user_data['clarification_questions'] = []
         context.user_data['original_query'] = None
 
@@ -553,83 +519,6 @@ async def handle_clarification_response(update: Update, context: ContextTypes.DE
         )
 
         await perform_ai_search(update, context, response, skip_clarification=True)
-
-
-async def handle_clarification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на inline-кнопки уточнения"""
-    query_obj = update.callback_query
-    await query_obj.answer()
-
-    data = query_obj.data or ""
-    user = update.effective_user
-
-    clarification_questions = context.user_data.get('clarification_questions', [])
-    original_query = context.user_data.get('original_query')
-
-    if not clarification_questions or not original_query:
-        await query_obj.edit_message_reply_markup(reply_markup=None)
-        await query_obj.message.reply_text(
-            "⚠️ Уточняющие вопросы больше неактуальны. Напишите новый запрос.",
-            reply_markup=get_main_keyboard(),
-        )
-        return
-
-    if data == "clarify_custom":
-        # Пользователь хочет ввести свой вопрос
-        await query_obj.edit_message_reply_markup(reply_markup=None)
-        await query_obj.message.reply_text(
-            "✍️ Окей, напишите свой уточняющий вопрос текстом.",
-            reply_markup=get_main_keyboard(),
-        )
-        # Сами флаги не трогаем — следующий текст уйдёт в handle_clarification_response
-        return
-
-    if data.startswith("clarify_"):
-        try:
-            num = int(data.split("_", 1)[1])
-        except ValueError:
-            await query_obj.answer("Неверный формат выбора", show_alert=True)
-            return
-
-        if not (1 <= num <= len(clarification_questions)):
-            await query_obj.answer("Неверный номер вопроса", show_alert=True)
-            return
-
-        selected_question = clarification_questions[num - 1]
-
-        # Чистим состояние уточнений
-        context.user_data['clarification_questions'] = []
-        context.user_data['original_query'] = None
-
-        refined_query = f"{original_query}. {selected_question}"
-
-        # Обновляем сообщение с вопросами (убираем клавиатуру, помечаем выбор)
-        try:
-            await query_obj.edit_message_text(
-                text=f"{query_obj.message.text}\n\n✅ Вы выбрали: {num}. {selected_question}",
-            )
-        except Exception:
-            # Если не получилось отредактировать — не страшно
-            pass
-
-        await query_obj.message.reply_text(
-            f"✅ Понял! Ищу информацию по теме: {selected_question}",
-        )
-
-        # Создаём фейковый update для perform_ai_search
-        # (т.к. у нас callback_query, а не message)
-        fake_update = Update(
-            update_id=update.update_id,
-            message=query_obj.message,
-        )
-
-        await perform_ai_search(
-            update=fake_update,
-            context=context,
-            query=refined_query,
-            skip_clarification=True,
-        )
-
 
 async def handle_correction_input(update: Update, context: ContextTypes.DEFAULT_TYPE, corrected_answer: str):
     """Обработка ввода правильного ответа"""
@@ -689,17 +578,9 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 for i, question in enumerate(questions, 1):
                     response += f"{i}. {question}\n"
 
-                response += (
-                    f"\nМожете:\n"
-                    f"- нажать кнопку ниже, или\n"
-                    f"- ввести номер 1–{len(questions)}, или\n"
-                    f"- написать свой уточняющий вопрос текстом."
-                )
+                response += f"\nВведите номер вопроса (1-{len(questions)}) или напишите свой уточняющий запрос"
 
-                await update.message.reply_text(
-                    response,
-                    reply_markup=get_clarification_inline_keyboard(questions),
-                )
+                await update.message.reply_text(response)
                 return
 
         # Получаем историю
@@ -757,7 +638,6 @@ async def perform_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             f"❌ Ошибка при обработке запроса: {str(e)}",
         )
 
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /stats"""
     try:
@@ -810,7 +690,6 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Ошибка при выполнении диагностики:\n{str(e)}",
         )
 
-
 async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный логгер всех апдейтов (для отладки)"""
     try:
@@ -827,7 +706,6 @@ async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("📥 Update от %s (%s): %s", uid, uname, repr(text))
     except Exception as e:
         logger.error("Ошибка в log_update: %s", repr(e))
-
 
 def main():
     """Запуск бота"""
@@ -851,17 +729,12 @@ def main():
     application.add_handler(CommandHandler("correct", correct_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
 
-    # Кнопки (reply-клавиатура)
+    # Кнопки
     application.add_handler(
         MessageHandler(
             filters.Regex(r"^(📊 Статистика|ℹ️ Справка|🗑️ Сброс истории|👍 Помог|👎 Не помог)$"),
             handle_button,
         )
-    )
-
-    # Inline-кнопки уточнений
-    application.add_handler(
-        CallbackQueryHandler(handle_clarification_callback, pattern=r"^clarify_")
     )
 
     # Любой другой текст
@@ -875,7 +748,6 @@ def main():
     logger.info("📁 Сессии сохраняются в папку: sessions/")
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == '__main__':
     main()
