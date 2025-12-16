@@ -36,7 +36,7 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333").strip()
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "tech_docs").strip()
 
 # === RAG ===
-TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "5"))
+TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "10"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 

@@ -59,9 +59,8 @@ class OllamaClient:
             logger.error(f"❌ Таймаут запроса к Ollama: {repr(e)}")
             raise Exception(f"Таймаут связи с Ollama: {e}")
         except requests.exceptions.HTTPError as e:
-            # Покажем статус и текст, чтобы в будущем легче дебажить
-            status = response.status_code if 'response' in locals() else 'no_response'
-            text = response.text[:500] if 'response' in locals() else ''
+            status = response.status_code if "response" in locals() else "no_response"
+            text = response.text[:500] if "response" in locals() else ""
             logger.error(f"❌ HTTP ошибка Ollama: {repr(e)}, status={status}, body={text}")
             raise Exception(f"Ошибка связи с Ollama: {e}")
         except Exception as e:
