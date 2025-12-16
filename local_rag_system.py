@@ -683,3 +683,4 @@ class RAGSystem:
             results.append(f"❌ Qdrant: ошибка подключения: {repr(e)}")
 
         return {"message": "\n\n".join(results)}
+    #
